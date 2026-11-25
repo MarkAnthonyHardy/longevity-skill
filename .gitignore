@@ -1,0 +1,3 @@
+tools/usage-log.jsonl
+*.pyc
+__pycache__/
