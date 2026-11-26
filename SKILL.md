@@ -73,7 +73,8 @@ Tool: `python3 ~/.claude/tools/pace.py` (called PACE below).
    too hands over when it reaches a limit, until the job's Done when is met.
 5. One worker at a time per job: before starting a new session, check no other
    session is already working on this same job. If one is, stand down instead of
-   starting another. Different jobs may run in parallel (see 5). After handing over, the old session starts no new work.
+   starting another. Different jobs may run in parallel (see section 5).
+   After handing over, the old session starts no new work.
 6. Pay-as-you-go or extra usage only inside a cap the user has already granted for
    that purpose. Never switch on extra usage yourself.
 
