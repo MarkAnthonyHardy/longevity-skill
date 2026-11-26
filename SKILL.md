@@ -7,106 +7,86 @@ Keep every task inside two limits: the plan's allowance until it refills, and
 200K tokens of context per task. Read the real meter; never guess a reading or
 claim one you did not take.
 
-Tool: `python3 ~/.claude/tools/pace.py` (called PACE below).
+Tool: `python3 ~/.claude/tools/pace.py` (called PACE below). Flags: [PACE.md](PACE.md).
 
 ## 0. Pick the model (job start)
 - Use the model the user names. Otherwise: opus for hard reasoning, design and
-  reviews; sonnet for normal coding; haiku for mechanical steps (formatting,
-  lookups, simple edits); fable only when the user asks for it.
-- Estimate the job size as a percent of the allowance on sonnet, then check it
-  fits on the chosen model:
+  reviews; sonnet for normal coding; haiku for mechanical steps; fable only when
+  the user asks for it.
+- Size the job with `PACE --history <job-type>` when past jobs of that type have
+  been logged, otherwise a rough percent on sonnet, then:
   `PACE --model <opus|sonnet|haiku|fable> --usage-json <get_usage file> --estimate <pct>`
-  - FITS: go ahead.
-  - TIGHT: go ahead in AMBER mode, using the SUGGEST model for routine parts.
-  - DOES NOT FIT: use the cheaper SUGGEST model, or split the job (section 2).
+  FITS: go ahead. TIGHT: work in AMBER, using the SUGGEST model for routine parts.
+  DOES NOT FIT: use the cheaper SUGGEST model, or split the job (section 3).
+- If the expected size or historical high is 160K tokens or more, split into
+  numbered sub-tasks that each fit, and do sub-task 1 only.
 - Relative costs live in `~/.claude/tools/model-costs.json`.
 
-## 1. Read both meters (job start, after each finished step, before any agent or long run)
-- Claude desktop app: call `mcp__ccd_session_mgmt__get_usage`. Each entry in
-  `plan.windows[]` gives `percentUsed` and `resetsAt` (all-models, any per-model
-  window such as Fable, and a 5-hour limit if shown); `context.tokensUsed` gives
-  this task's tokens. Save the JSON to a file for PACE.
-- Codex: `PACE --codex` for the allowance, `PACE --codex-context` for tokens.
-  STALE means the reset has passed: do one turn, then read again.
-- Any other AI has no meter it can read itself. Ask the user once for percent used
-  and reset time. Count tokens as about 4 characters per token across everything
-  read and written. Without an allowance answer, work in AMBER.
+## 1. Dry run (required unless the job is small)
+Skip only when the job is expected under about 50K tokens. Otherwise, before any
+edits, do a read-only planning pass on sonnet or haiku and write
+`~/.claude/handovers/<job>/DRYRUN.md`. Real work starts from that file.
+Details and the template: [DRYRUN.md](DRYRUN.md).
 
-## 2. Work out where you stand
-- Allowance: `PACE --model <name> --usage-json <file>` (or
-  `PACE --used <percent> --resets-at <time> --window-hours <168 weekly, 5 for 5-hour>`).
-  The headline is the tighter of the all-models window and the model's own window.
+## 2. Read both meters
+At job start, after each finished step, and before any large file read, test run,
+subagent, or step expected to add more than about 20K tokens:
+- Claude desktop: call `mcp__ccd_session_mgmt__get_usage`. Use `plan.windows[]`
+  (`percentUsed`, `resetsAt`) and `context.tokensUsed`. Save the JSON for PACE.
+  Never type a guessed token count into `--tokens`.
+- Codex: `PACE --codex` and `PACE --codex-context`. STALE: do one turn, then
+  read again.
+- Any other AI: ask the user once for percent used and reset time; count tokens
+  as about 4 characters per token. Without an allowance answer, work in AMBER.
+  If you cannot read tokens, pass `PACE --tokens <n> --estimated`.
+
+## 3. Work out where you stand
+- Allowance: `PACE --model <name> --usage-json <file>` (or `--used` /
+  `--resets-at` / `--window-hours` 168 weekly, 5 for a 5-hour window). The
+  headline is the tighter of the all-models window and the model's own window.
   - GREEN: projected under 85% by reset. Work normally.
-  - AMBER: projected 85–99%, or under 25% left. Cheaper mode: smaller model for
-    mechanical steps, no parallel agents, no repeat test suites, short replies,
-    read only the file ranges you need.
+  - AMBER: projected 85–99%, or under 25% left. Cheaper model for mechanical
+    steps, no parallel agents, no repeat test suites, short replies, read only
+    the file ranges you need.
   - RED: under 10% left, or projected to hit 100% before reset. Finish the
-    current step only, then go to 3.
-- Task tokens: `PACE --tokens <n>`
+    current step only, then go to 4.
+- Task tokens: `PACE --tokens <context.tokensUsed>`
   - OK: under 160K. Carry on.
-  - FINISH STEP, THEN HAND OVER: 160K–199K. Finish the current step only, start
-    no new one, then go to 3.
-  - HANDOVER NOW: 200K or more. Stop after the current tool call and go to 3.
-- Before starting a task, estimate its size. If it will not fit in 200K, split
-  it into numbered sub-tasks that each fit, and do sub-task 1 only.
+  - FINISH STEP, THEN HAND OVER: 160K–199K. Finish the current step only, then
+    go to 4.
+  - HANDOVER NOW: 200K or more. Stop after the current tool call and go to 4.
+  - If the count is only estimated (`--estimated`): treat thresholds as 130K
+    and 170K.
 
-## 3. Hand over to a new context window (automatic, no waiting for the user)
-1. Write the handover notes to `~/.claude/handovers/<job>/CONTINUE_HERE.md`, a
-   scratch folder outside the repo, so a "no repo edits" brief never blocks it.
-   Use exactly these headings: Goal, Done when, Branch/PR links, Agreed reviewer
-   checklist, Model to use, First command to run. Done when all six are filled in.
-   Add a copy in the project folder only if the brief allows it.
-2. Choose where the next window opens:
-   - Token limit hit, allowance GREEN or AMBER: a new session on the same AI.
-   - Allowance RED: a new session on a model whose meter is GREEN or AMBER
-     (for example opus to sonnet).
-   - No AI has headroom: tell the user the earliest reset time and stop.
-3. Start the new session yourself, straight away. Do not ask the user to open it.
-   In Claude desktop, use its session tool (`mcp__ccd_session_mgmt__*`) to start
-   a new session in the same project folder, on the model named in
-   CONTINUE_HERE.md, with the path to that file as its first message.
-   Done when the new session has replied that it read the file.
-   If you cannot start one (no session tool, or switching to a different AI
-   such as Codex), tell the user in one line exactly what to open and paste.
-4. The new session checks it is in the right folder (pwd) and reads
-   CONTINUE_HERE.md before doing anything else. It repeats this skill, so it
-   too hands over when it reaches a limit, until the job's Done when is met.
-5. One worker at a time per job: before starting a new session, check no other
-   session is already working on this same job. If one is, stand down instead of
-   starting another. Different jobs may run in parallel (see section 5).
-   After handing over, the old session starts no new work.
-6. Pay-as-you-go or extra usage only inside a cap the user has already granted for
-   that purpose. Never switch on extra usage yourself.
+## 4. Hand over to a new context window (automatic, no waiting for the user)
+1. Write notes to `~/.claude/handovers/<job>/CONTINUE_HERE.md` (a scratch folder
+   outside the repo, so a "no repo edits" brief never blocks it). Headings:
+   Goal, Done when, Branch/PR links, Agreed reviewer checklist, Model to use,
+   First command to run. State the review status in plain words (for example:
+   "Geo HOLD 1 of 2, fixes not applied").
+2. Token limit, allowance GREEN or AMBER: a new session on the same AI.
+   Allowance RED: a model whose meter is GREEN or AMBER. No headroom: tell the
+   user the earliest reset time and stop.
+3. Start the new session yourself, with the path to CONTINUE_HERE.md as its
+   first message. In Claude desktop, use the session tool
+   (`mcp__ccd_session_mgmt__*`). Done when the new session has replied that it
+   read the file. If you cannot start one, tell the user in one line what to
+   open and paste.
+4. The new session checks it is in the right folder (pwd), reads
+   CONTINUE_HERE.md first, and repeats this skill until Done when is met. After
+   handing over, the old session starts no new work. One worker at a time per
+   job; different jobs may run in parallel (see [COORDINATOR.md](COORDINATOR.md)).
+5. Pay-as-you-go or extra usage only inside a cap the user has already granted.
+   Never switch it on yourself.
+6. On finish or handover, log the real final count:
+   `PACE --tokens <tokensUsed> --worker <job> --job-type <job-type> --final`.
 
-## 4. Report
+## 5. Report
 One line: model, allowance zone and percent used, task tokens, reset time, and
 where the work was handed (if anywhere). Then stop.
 
-## 5. Coordinator: starting several jobs at once
-All sessions share ONE allowance, so size them together.
-1. Read the meter (section 1), then for each job run
-   `PACE --model <m> --usage-json <file> --estimate <pct> --sessions <N>`
-   (`--estimate` is one job's size, N the number of parallel jobs). It checks the
-   total and prints each worker's SHARE of the allowance. DOES NOT FIT: run fewer
-   at once, or use a cheaper model for some.
-2. Paste the Worker block (section 6) verbatim into EVERY brief, with `<job>` filled in.
-   Never rely on a worker loading the skill by itself.
-3. Never tell a worker "no CONTINUE_HERE" without adding that handover notes go to
-   `~/.claude/handovers/<job>/` (outside the repo, so allowed).
-4. Re-read the meter and re-run PACE each time a job reports; start no new job in
-   RED, and tell the others to finish their step if the zone worsens.
-5. Check each worker's reported tokens; any at 160K or more gets a handover now.
-
-## 6. Worker block (paste verbatim into each brief; `<job>` = the job's short name)
-```
-USAGE RULES (Longevity): load the longevity skill first. At the start and after
-each finished step run `python3 ~/.claude/tools/pace.py --tokens <your tokens> --worker <job>`
-(this also logs one line for you). At 160K tokens: finish the current step, start
-no new one, and write handover notes. At 200K: stop after the current tool call
-and hand over now. Handover notes go in ~/.claude/handovers/<job>/CONTINUE_HERE.md,
-a scratch folder outside the repo, so a "no repo edits" rule does not apply. Then
-start the new session yourself with the path to that file as its first message;
-do not ask the user. If another session is already working on this job, stand
-down. The allowance is shared with the other jobs: do not start parallel agents
-or repeat full test runs unless the coordinator says so.
-```
+## 6. Parallel jobs and worker briefs
+All sessions share one allowance. Before starting workers, follow
+[COORDINATOR.md](COORDINATOR.md). Paste [WORKER_BLOCK.md](WORKER_BLOCK.md)
+verbatim into every brief, with `<job>` filled in. Never rely on a worker
+loading this skill by itself.

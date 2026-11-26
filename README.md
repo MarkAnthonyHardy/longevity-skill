@@ -8,7 +8,8 @@ A skill for Claude (and other AIs) that keeps a job inside your plan's usage lim
 - Reads your real usage meter: the plan window (weekly, and a 5-hour or per-model window if you have one) and this task's token count.
 - Works in GREEN, AMBER, or RED. In AMBER it uses a cheaper model for routine steps and does less parallel work. In RED it finishes the current step only, then hands over.
 - Writes a `CONTINUE_HERE.md` handover note to `~/.claude/handovers/<job>/` (a scratch folder outside your repo, so it never clashes with a "no repo edits" rule) and starts the next session itself, so a large job can continue across sessions until it is done.
-- Runs several jobs in parallel safely: a coordinator section sizes them against the one shared allowance, and a fixed worker block is pasted into every job's brief so each worker checks its own tokens and hands over on its own.
+- For any job that is not small, starts with a cheap read-only dry run (`DRYRUN.md`) and sizes the job from real past token counts when they exist (`pace.py --history`).
+- Runs several jobs in parallel safely: a coordinator guide sizes them against the one shared allowance, and a fixed worker block is pasted into every brief so each worker checks its own tokens and hands over on its own.
 - It never switches on extra or pay-as-you-go usage unless you have already granted a cap for that purpose.
 
 ## Install
@@ -17,7 +18,7 @@ Copy the skill and the tools into your Claude folders:
 
 ```bash
 mkdir -p ~/.claude/skills/longevity ~/.claude/tools
-cp SKILL.md ~/.claude/skills/longevity/
+cp SKILL.md COORDINATOR.md WORKER_BLOCK.md DRYRUN.md PACE.md ~/.claude/skills/longevity/
 cp tools/pace.py tools/model-costs.json ~/.claude/tools/
 chmod +x ~/.claude/tools/pace.py
 ```
@@ -38,16 +39,17 @@ If the allowance itself is almost gone, it will suggest a cheaper model for the 
 
 ## Several jobs at once
 
-All sessions draw on one allowance. Size the jobs together and see each worker's share:
+All sessions draw on one allowance. Size them from history when you have it, then see each worker's share:
 
 ```bash
+python3 ~/.claude/tools/pace.py --history review
 python3 ~/.claude/tools/pace.py --model sonnet --usage-json usage.json --estimate 10 --sessions 4
 ```
 
-`--estimate` is one job's size, `--sessions` the number of parallel workers. The output checks the total and prints a `SHARE` line (the allowance minus a 5% reserve, split across the workers). A worker logs its own line with:
+`--history` reports the median and high final tokens for past jobs of that type (or says there is no history). If the high is 160K or more, split the job before starting. `--sessions` splits the remaining allowance (minus a 5% reserve) across N workers. A worker logs a real final count with:
 
 ```bash
-python3 ~/.claude/tools/pace.py --tokens 150000 --worker my-job
+python3 ~/.claude/tools/pace.py --tokens 150000 --worker my-job --job-type review --final
 ```
 
-`SKILL.md` section 6 has the worker block to paste into every brief.
+Details live one level down from `SKILL.md`: `COORDINATOR.md`, `WORKER_BLOCK.md`, `DRYRUN.md`, and `PACE.md`.

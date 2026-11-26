@@ -299,30 +299,103 @@ def run_allowance(
     return reading["line"]
 
 
-def token_zone(n: int) -> str:
-    if n < 160_000:
+def token_zone(n: int, estimated: bool = False) -> str:
+    finish, now = (130_000, 170_000) if estimated else (160_000, 200_000)
+    if n < finish:
         return TOKEN_OK
-    if n < 200_000:
+    if n < now:
         return TOKEN_FINISH
     return TOKEN_NOW
 
 
-def run_tokens(n: int, worker: Optional[str] = None, write_log: bool = False) -> str:
+def run_tokens(
+    n: int,
+    worker: Optional[str] = None,
+    write_log: bool = False,
+    estimated: bool = False,
+    job_type: Optional[str] = None,
+    final: bool = False,
+) -> str:
     if n < 0:
         raise SystemExit("error: --tokens must be 0 or more, got %s" % n)
-    zone = token_zone(n)
-    if worker and write_log:
-        append_log(
-            log_path(),
-            {
-                "kind": "worker",
-                "ts": now_utc().astimezone(timezone.utc).isoformat(),
-                "worker": worker,
-                "tokens": n,
-                "zone": zone,
-            },
+    zone = token_zone(n, estimated=estimated)
+    label = (job_type or worker or "").strip() or None
+    if write_log and (worker or final):
+        record = {
+            "kind": "final" if final else "worker",
+            "ts": now_utc().astimezone(timezone.utc).isoformat(),
+            "worker": worker,
+            "tokens": n,
+            "zone": zone,
+            "estimated": bool(estimated),
+        }
+        if label:
+            record["job_type"] = label
+        append_log(log_path(), record)
+    line = "TOKENS  %s  %s" % (n, zone)
+    if estimated:
+        line += "  ESTIMATED (thresholds 130K/170K)"
+    if final:
+        line += "  FINAL  job-type=%s" % (label or "?")
+    return line
+
+
+def median_tokens(values: List[int]) -> int:
+    ordered = sorted(values)
+    n = len(ordered)
+    if n % 2:
+        return ordered[n // 2]
+    return (ordered[n // 2 - 1] + ordered[n // 2] + 1) // 2
+
+
+def job_history_tokens(job_type: str, records: Optional[List[Dict[str, Any]]] = None) -> List[int]:
+    wanted = job_type.strip().lower()
+    rows = records if records is not None else []
+    if records is None:
+        log = log_path()
+        if log.is_file():
+            for line in log.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    out: List[int] = []
+    for row in rows:
+        if row.get("kind") != "final":
+            continue
+        if str(row.get("job_type") or "").strip().lower() != wanted:
+            continue
+        if row.get("estimated"):
+            continue
+        tokens = row.get("tokens")
+        if isinstance(tokens, bool) or not isinstance(tokens, (int, float)) or tokens < 0:
+            continue
+        out.append(int(tokens))
+    return out
+
+
+def run_history(job_type: str, records: Optional[List[Dict[str, Any]]] = None) -> str:
+    if not job_type or not str(job_type).strip():
+        raise ValueError("--history needs a job type")
+    values = job_history_tokens(job_type, records=records)
+    if not values:
+        return (
+            "HISTORY  job-type=%s  n=0  NO HISTORY  use a rough estimate"
+            % job_type.strip()
         )
-    return "TOKENS  %s  %s" % (n, zone)
+    high = max(values)
+    line = "HISTORY  job-type=%s  n=%d  median=%s  high=%s" % (
+        job_type.strip(),
+        len(values),
+        median_tokens(values),
+        high,
+    )
+    if high >= 160_000:
+        line += "\nSPLIT: historical high is 160K or more; split the job before starting"
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -1275,7 +1348,8 @@ Usage:
       [--model-used <pct> --model-resets-at <time> --model-window-hours <n>]
   python3 %(prog)s --model <name> --usage-json <file|-> --estimate <pct-on-default-model>
   python3 %(prog)s --model <name> --usage-json <file|-> --estimate <pct> --sessions <N>
-  python3 %(prog)s --tokens <n> --worker <job-name>
+  python3 %(prog)s --tokens <n> --worker <job-name> [--estimated] [--job-type <label> --final]
+  python3 %(prog)s --history <job-type>
   python3 %(prog)s --self-test
   python3 %(prog)s --help
 
@@ -1291,6 +1365,7 @@ Task tokens:
   OK                              under 160000
   FINISH STEP, THEN HAND OVER     160000-199999
   HANDOVER NOW                    200000 or more
+  With --estimated (a guess, not a meter reading): thresholds are 130000 / 170000.
 
 Claude desktop: call mcp__ccd_session_mgmt__get_usage (also called get_usage).
   Save the JSON and pass it with --usage-json, or copy plan.windows[].percentUsed
@@ -1311,6 +1386,11 @@ Model choice:
   worker's size and the check runs on the total; a SHARE line says how much of the
   allowance (minus the 5%% reserve) each worker may spend.
   --tokens <n> --worker <name> also writes one log line for that worker.
+  --estimated applies the 130K/170K safety thresholds when the count is a guess.
+  On finish or handover, add --job-type <label> --final to log the real final
+  tokens for that type of job.
+  --history <job-type> reports the median and high final tokens for past jobs
+  of that type, or NO HISTORY. SPLIT if the high is 160K or more.
 
 Codex: --codex reads the latest rate_limits from ~/.codex/sessions.
   --codex-context reads the latest last_token_usage.input_tokens.
@@ -1341,6 +1421,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--estimate", type=float)
     p.add_argument("--sessions", type=int)
     p.add_argument("--worker")
+    p.add_argument("--estimated", action="store_true")
+    p.add_argument("--job-type", dest="job_type")
+    p.add_argument("--final", action="store_true")
+    p.add_argument("--history")
     p.add_argument("--self-test", dest="self_test", action="store_true")
     return p
 
@@ -1376,19 +1460,35 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.codex,
         args.codex_context,
         model_mode,
+        args.history is not None,
     ]
     if sum(1 for f in flags if f) > 1:
         sys.stderr.write(
-            "error: use only one of --used/--resets-at/--window-hours, --tokens, --codex, --codex-context, or --model/--usage-json/--estimate\n"
+            "error: use only one of --used/--resets-at/--window-hours, --tokens, --codex, --codex-context, --model/--usage-json/--estimate, or --history\n"
         )
         return 2
 
-    if args.worker and args.tokens is None:
-        sys.stderr.write("error: --worker only goes with --tokens\n")
+    if (args.worker or args.estimated or args.job_type or args.final) and args.tokens is None:
+        sys.stderr.write("error: --worker, --estimated, --job-type and --final only go with --tokens\n")
+        return 2
+    if args.final and not (args.job_type or args.worker):
+        sys.stderr.write("error: --final needs --job-type or --worker\n")
         return 2
     try:
+        if args.history is not None:
+            print(run_history(args.history))
+            return 0
         if args.tokens is not None:
-            print(run_tokens(args.tokens, worker=args.worker, write_log=True))
+            print(
+                run_tokens(
+                    args.tokens,
+                    worker=args.worker,
+                    write_log=True,
+                    estimated=args.estimated,
+                    job_type=args.job_type,
+                    final=args.final,
+                )
+            )
             return 0
         if args.codex:
             print(run_codex())
@@ -1443,6 +1543,14 @@ class PaceTests(unittest.TestCase):
         self.assertEqual(token_zone(200_000), TOKEN_NOW)
         self.assertEqual(token_zone(250_000), TOKEN_NOW)
         self.assertEqual(run_tokens(150000), "TOKENS  150000  OK")
+        self.assertEqual(token_zone(129_999, estimated=True), TOKEN_OK)
+        self.assertEqual(token_zone(130_000, estimated=True), TOKEN_FINISH)
+        self.assertEqual(token_zone(169_999, estimated=True), TOKEN_FINISH)
+        self.assertEqual(token_zone(170_000, estimated=True), TOKEN_NOW)
+        self.assertEqual(
+            run_tokens(140000, estimated=True),
+            "TOKENS  140000  FINISH STEP, THEN HAND OVER  ESTIMATED (thresholds 130K/170K)",
+        )
 
     def test_stricter_zone(self):
         self.assertEqual(stricter("GREEN", "AMBER"), "AMBER")
@@ -1888,6 +1996,35 @@ class ModelPaceTests(unittest.TestCase):
         # No worker name: nothing logged
         run_tokens(10, write_log=True)
         self.assertEqual(len(log.read_text().splitlines()), 1)
+
+    def test_final_tokens_and_history(self):
+        log = Path(os.environ["PACE_LOG_PATH"])
+        self.assertEqual(
+            run_tokens(90000, worker="a", job_type="review", final=True, write_log=True),
+            "TOKENS  90000  OK  FINAL  job-type=review",
+        )
+        self.assertEqual(
+            run_tokens(180000, worker="b", job_type="review", final=True, write_log=True),
+            "TOKENS  180000  FINISH STEP, THEN HAND OVER  FINAL  job-type=review",
+        )
+        self.assertEqual(
+            run_tokens(200000, worker="c", job_type="review", final=True, write_log=True),
+            "TOKENS  200000  HANDOVER NOW  FINAL  job-type=review",
+        )
+        # Guessed finals and other types are ignored
+        run_tokens(250000, worker="d", job_type="review", estimated=True, final=True, write_log=True)
+        run_tokens(50000, worker="e", job_type="other", final=True, write_log=True)
+        out = run_history("review")
+        self.assertEqual(
+            out,
+            "HISTORY  job-type=review  n=3  median=180000  high=200000\n"
+            "SPLIT: historical high is 160K or more; split the job before starting",
+        )
+        self.assertIn("NO HISTORY  use a rough estimate", run_history("unseen"))
+        rows = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+        finals = [r for r in rows if r.get("kind") == "final" and r.get("job_type") == "review"]
+        self.assertEqual(len(finals), 4)
+        self.assertTrue(finals[-1]["estimated"])
 
     def test_estimate_scales_by_relative_cost(self):
         # 10% on sonnet -> 40% on fable (cost 4), added to 28% all-models = 68%
