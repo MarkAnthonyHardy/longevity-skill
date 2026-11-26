@@ -18,7 +18,7 @@ Copy the skill and the tools into your Claude folders:
 
 ```bash
 mkdir -p ~/.claude/skills/longevity ~/.claude/tools
-cp SKILL.md COORDINATOR.md WORKER_BLOCK.md DRYRUN.md PACE.md ~/.claude/skills/longevity/
+cp SKILL.md COORDINATOR.md WORKER_BLOCK.md DRYRUN.md PACE.md ZONES.md HANDOVER.md ~/.claude/skills/longevity/
 cp tools/pace.py tools/model-costs.json ~/.claude/tools/
 chmod +x ~/.claude/tools/pace.py
 ```
@@ -52,4 +52,4 @@ python3 ~/.claude/tools/pace.py --model sonnet --usage-json usage.json --estimat
 python3 ~/.claude/tools/pace.py --tokens 150000 --worker my-job --job-type review --final
 ```
 
-Details live one level down from `SKILL.md`: `COORDINATOR.md`, `WORKER_BLOCK.md`, `DRYRUN.md`, and `PACE.md`.
+Details live one level down from `SKILL.md`: `ZONES.md`, `HANDOVER.md`, `DRYRUN.md`, `COORDINATOR.md`, `WORKER_BLOCK.md` and `PACE.md` (loaded only when needed).
