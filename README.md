@@ -7,7 +7,8 @@ A skill for Claude (and other AIs) that keeps a job inside your plan's usage lim
 - Chooses a model for the job (or uses the one you name), then checks whether the job will fit in the remaining allowance.
 - Reads your real usage meter: the plan window (weekly, and a 5-hour or per-model window if you have one) and this task's token count.
 - Works in GREEN, AMBER, or RED. In AMBER it uses a cheaper model for routine steps and does less parallel work. In RED it finishes the current step only, then hands over.
-- Writes a `CONTINUE_HERE.md` handover note and starts the next session itself, in the same folder, so a large job can continue across sessions until it is done.
+- Writes a `CONTINUE_HERE.md` handover note to `~/.claude/handovers/<job>/` (a scratch folder outside your repo, so it never clashes with a "no repo edits" rule) and starts the next session itself, so a large job can continue across sessions until it is done.
+- Runs several jobs in parallel safely: a coordinator section sizes them against the one shared allowance, and a fixed worker block is pasted into every job's brief so each worker checks its own tokens and hands over on its own.
 - It never switches on extra or pay-as-you-go usage unless you have already granted a cap for that purpose.
 
 ## Install
@@ -34,3 +35,19 @@ python3 ~/.claude/tools/pace.py --used 72 --resets-at "2026-12-01 00:00" --windo
 You start a large coding job. Longevity checks your meter, sees plenty of allowance, and works normally on Sonnet. After several steps the task is close to 160K tokens, so it finishes the current step, writes `CONTINUE_HERE.md` with the goal, what "done" looks like, the model to use, and the next command, then opens a new session with that file as the first message. The new session picks up where the last one stopped, and the job keeps going.
 
 If the allowance itself is almost gone, it will suggest a cheaper model for the leftover work, or tell you the earliest refill time and stop, rather than running the meter dry.
+
+## Several jobs at once
+
+All sessions draw on one allowance. Size the jobs together and see each worker's share:
+
+```bash
+python3 ~/.claude/tools/pace.py --model sonnet --usage-json usage.json --estimate 10 --sessions 4
+```
+
+`--estimate` is one job's size, `--sessions` the number of parallel workers. The output checks the total and prints a `SHARE` line (the allowance minus a 5% reserve, split across the workers). A worker logs its own line with:
+
+```bash
+python3 ~/.claude/tools/pace.py --tokens 150000 --worker my-job
+```
+
+`SKILL.md` section 6 has the worker block to paste into every brief.

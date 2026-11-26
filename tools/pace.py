@@ -307,10 +307,22 @@ def token_zone(n: int) -> str:
     return TOKEN_NOW
 
 
-def run_tokens(n: int) -> str:
+def run_tokens(n: int, worker: Optional[str] = None, write_log: bool = False) -> str:
     if n < 0:
         raise SystemExit("error: --tokens must be 0 or more, got %s" % n)
-    return "TOKENS  %s  %s" % (n, token_zone(n))
+    zone = token_zone(n)
+    if worker and write_log:
+        append_log(
+            log_path(),
+            {
+                "kind": "worker",
+                "ts": now_utc().astimezone(timezone.utc).isoformat(),
+                "worker": worker,
+                "tokens": n,
+                "zone": zone,
+            },
+        )
+    return "TOKENS  %s  %s" % (n, zone)
 
 
 # ---------------------------------------------------------------------------
@@ -1139,7 +1151,10 @@ def run_model_pace(
     estimate_pct: Optional[float] = None,
     now: Optional[datetime] = None,
     write_log: bool = True,
+    sessions: Optional[int] = None,
 ) -> str:
+    if sessions is not None and sessions < 1:
+        raise ValueError("--sessions must be 1 or more, got %s" % sessions)
     now = now or now_utc()
     costs = load_costs()
     chosen, readings, notes = collect_model_readings(
@@ -1209,7 +1224,26 @@ def run_model_pace(
         if not chosen:
             chosen = resolve_model(costs.get("default_model") or "sonnet", costs)
             lines.append("ESTIMATE  using default model %s (pass --model to choose)" % chosen["id"])
-        lines.extend(estimate_job(chosen, float(estimate_pct), readings, costs))
+        total_pct = float(estimate_pct) * (sessions or 1)
+        if sessions and sessions > 1:
+            lines.append(
+                "PARALLEL  %d workers x %s%% = %s%% total on %s (all share one allowance)"
+                % (sessions, format_pct(float(estimate_pct)), format_pct(total_pct), costs.get("default_model") or "sonnet")
+            )
+        lines.extend(estimate_job(chosen, total_pct, readings, costs))
+
+    if sessions and tighter:
+        spendable = max(0.0, float(tighter["remaining"]) - 5.0)
+        lines.append(
+            "SHARE  %d workers  %s%% spendable (%s%% left minus the 5%% reserve)  =  %s%% each, on the %s window"
+            % (
+                sessions,
+                format_pct(spendable),
+                format_pct(tighter["remaining"]),
+                format_pct(spendable / sessions),
+                tighter.get("label") or tighter.get("kind") or "tighter",
+            )
+        )
 
     if write_log and tighter and not tighter.get("stale"):
         append_log(
@@ -1225,6 +1259,7 @@ def run_model_pace(
                 "how": tighter.get("how"),
                 "window_key": tighter.get("label") or tighter.get("kind"),
                 "model": chosen["id"] if chosen else None,
+                **({"sessions": sessions} if sessions else {}),
             },
         )
     return "\n".join(lines)
@@ -1239,6 +1274,8 @@ Usage:
   python3 %(prog)s --model <name> --used <pct> --resets-at <time> --window-hours <n> \\
       [--model-used <pct> --model-resets-at <time> --model-window-hours <n>]
   python3 %(prog)s --model <name> --usage-json <file|-> --estimate <pct-on-default-model>
+  python3 %(prog)s --model <name> --usage-json <file|-> --estimate <pct> --sessions <N>
+  python3 %(prog)s --tokens <n> --worker <job-name>
   python3 %(prog)s --self-test
   python3 %(prog)s --help
 
@@ -1270,6 +1307,10 @@ Model choice:
   unless you change ~/.claude/tools/model-costs.json). It projects spend on the
   chosen model, says FITS, TIGHT, or DOES NOT FIT, and may suggest a cheaper
   model for routine parts.
+  --sessions <N> says N workers share the one allowance. --estimate is then each
+  worker's size and the check runs on the total; a SHARE line says how much of the
+  allowance (minus the 5%% reserve) each worker may spend.
+  --tokens <n> --worker <name> also writes one log line for that worker.
 
 Codex: --codex reads the latest rate_limits from ~/.codex/sessions.
   --codex-context reads the latest last_token_usage.input_tokens.
@@ -1298,6 +1339,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model-resets-at", dest="model_resets_at")
     p.add_argument("--model-window-hours", dest="model_window_hours", type=float)
     p.add_argument("--estimate", type=float)
+    p.add_argument("--sessions", type=int)
+    p.add_argument("--worker")
     p.add_argument("--self-test", dest="self_test", action="store_true")
     return p
 
@@ -1320,6 +1363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.model,
             args.usage_json,
             args.estimate is not None,
+            args.sessions is not None,
             args.model_used is not None,
             args.model_resets_at,
             args.model_window_hours is not None,
@@ -1339,9 +1383,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 2
 
+    if args.worker and args.tokens is None:
+        sys.stderr.write("error: --worker only goes with --tokens\n")
+        return 2
     try:
         if args.tokens is not None:
-            print(run_tokens(args.tokens))
+            print(run_tokens(args.tokens, worker=args.worker, write_log=True))
             return 0
         if args.codex:
             print(run_codex())
@@ -1362,6 +1409,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     model_resets=args.model_resets_at,
                     model_hours=args.model_window_hours,
                     estimate_pct=args.estimate,
+                    sessions=args.sessions,
                 )
             )
             return 0
@@ -1793,6 +1841,53 @@ class ModelPaceTests(unittest.TestCase):
         self.assertIn("  all-models  GREEN  used=30%", out)
         # 30% weekly is the tighter used among GREEN windows
         self.assertIn("tighter=all-models:GREEN  used=30%", out.splitlines()[0])
+
+    def test_sessions_splits_allowance_and_totals_estimate(self):
+        out = run_model_pace(
+            model_name="sonnet",
+            usage_windows=extract_usage_windows(self.ULTRA),
+            estimate_pct=10,
+            sessions=4,
+            now=self.now,
+            write_log=False,
+        )
+        # 28% used -> 72% left, minus 5% reserve = 67% spendable, / 4 = 16.75% each
+        self.assertIn("PARALLEL  4 workers x 10% = 40% total on sonnet", out)
+        self.assertIn("ESTIMATE  job=40% on sonnet", out)
+        self.assertIn("SHARE  4 workers  67% spendable (72% left minus the 5% reserve)  =  16.8% each", out)
+
+    def test_sessions_one_has_no_parallel_line_and_zero_left_is_safe(self):
+        out = run_model_pace(
+            model_name="sonnet",
+            usage_windows=extract_usage_windows(self.ULTRA),
+            sessions=1,
+            now=self.now,
+            write_log=False,
+        )
+        self.assertNotIn("PARALLEL", out)
+        self.assertIn("SHARE  1 workers  67% spendable", out)
+        data = json.loads(json.dumps(self.ULTRA))
+        data["plan"]["windows"][0]["percentUsed"] = 97
+        out2 = run_model_pace(
+            model_name="sonnet",
+            usage_windows=extract_usage_windows(data),
+            sessions=3,
+            now=self.now,
+            write_log=False,
+        )
+        self.assertIn("SHARE  3 workers  0% spendable", out2)
+        with self.assertRaises(ValueError):
+            run_model_pace(model_name="sonnet", usage_windows=extract_usage_windows(self.ULTRA), sessions=0, now=self.now, write_log=False)
+
+    def test_worker_tokens_writes_one_log_line(self):
+        log = Path(os.environ["PACE_LOG_PATH"])
+        self.assertEqual(run_tokens(161000, worker="job4", write_log=True), "TOKENS  161000  FINISH STEP, THEN HAND OVER")
+        rows = [json.loads(l) for l in log.read_text().splitlines()]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["kind"], rows[0]["worker"], rows[0]["tokens"]), ("worker", "job4", 161000))
+        # No worker name: nothing logged
+        run_tokens(10, write_log=True)
+        self.assertEqual(len(log.read_text().splitlines()), 1)
 
     def test_estimate_scales_by_relative_cost(self):
         # 10% on sonnet -> 40% on fable (cost 4), added to 28% all-models = 68%

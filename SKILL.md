@@ -51,9 +51,11 @@ Tool: `python3 ~/.claude/tools/pace.py` (called PACE below).
   it into numbered sub-tasks that each fit, and do sub-task 1 only.
 
 ## 3. Hand over to a new context window (automatic, no waiting for the user)
-1. Write CONTINUE_HERE.md in the project folder with exactly these headings:
-   Goal, Done when, Branch/PR links, Agreed reviewer checklist, Model to use,
-   First command to run. Done when all six are filled in.
+1. Write the handover notes to `~/.claude/handovers/<job>/CONTINUE_HERE.md`, a
+   scratch folder outside the repo, so a "no repo edits" brief never blocks it.
+   Use exactly these headings: Goal, Done when, Branch/PR links, Agreed reviewer
+   checklist, Model to use, First command to run. Done when all six are filled in.
+   Add a copy in the project folder only if the brief allows it.
 2. Choose where the next window opens:
    - Token limit hit, allowance GREEN or AMBER: a new session on the same AI.
    - Allowance RED: a new session on a model whose meter is GREEN or AMBER
@@ -62,19 +64,48 @@ Tool: `python3 ~/.claude/tools/pace.py` (called PACE below).
 3. Start the new session yourself, straight away. Do not ask the user to open it.
    In Claude desktop, use its session tool (`mcp__ccd_session_mgmt__*`) to start
    a new session in the same project folder, on the model named in
-   CONTINUE_HERE.md, with CONTINUE_HERE.md as its first message.
+   CONTINUE_HERE.md, with the path to that file as its first message.
    Done when the new session has replied that it read the file.
    If you cannot start one (no session tool, or switching to a different AI
    such as Codex), tell the user in one line exactly what to open and paste.
 4. The new session checks it is in the right folder (pwd) and reads
    CONTINUE_HERE.md before doing anything else. It repeats this skill, so it
    too hands over when it reaches a limit, until the job's Done when is met.
-5. One worker at a time: before starting a new session, check no other session
-   is already working on this job. If one is, stand down instead of starting
-   another. After handing over, the old session starts no new work.
+5. One worker at a time per job: before starting a new session, check no other
+   session is already working on this same job. If one is, stand down instead of
+   starting another. Different jobs may run in parallel (see 5). After handing over, the old session starts no new work.
 6. Pay-as-you-go or extra usage only inside a cap the user has already granted for
    that purpose. Never switch on extra usage yourself.
 
 ## 4. Report
 One line: model, allowance zone and percent used, task tokens, reset time, and
 where the work was handed (if anywhere). Then stop.
+
+## 5. Coordinator: starting several jobs at once
+All sessions share ONE allowance, so size them together.
+1. Read the meter (section 1), then for each job run
+   `PACE --model <m> --usage-json <file> --estimate <pct> --sessions <N>`
+   (`--estimate` is one job's size, N the number of parallel jobs). It checks the
+   total and prints each worker's SHARE of the allowance. DOES NOT FIT: run fewer
+   at once, or use a cheaper model for some.
+2. Paste the Worker block (section 6) verbatim into EVERY brief, with `<job>` filled in.
+   Never rely on a worker loading the skill by itself.
+3. Never tell a worker "no CONTINUE_HERE" without adding that handover notes go to
+   `~/.claude/handovers/<job>/` (outside the repo, so allowed).
+4. Re-read the meter and re-run PACE each time a job reports; start no new job in
+   RED, and tell the others to finish their step if the zone worsens.
+5. Check each worker's reported tokens; any at 160K or more gets a handover now.
+
+## 6. Worker block (paste verbatim into each brief; `<job>` = the job's short name)
+```
+USAGE RULES (Longevity): load the longevity skill first. At the start and after
+each finished step run `python3 ~/.claude/tools/pace.py --tokens <your tokens> --worker <job>`
+(this also logs one line for you). At 160K tokens: finish the current step, start
+no new one, and write handover notes. At 200K: stop after the current tool call
+and hand over now. Handover notes go in ~/.claude/handovers/<job>/CONTINUE_HERE.md,
+a scratch folder outside the repo, so a "no repo edits" rule does not apply. Then
+start the new session yourself with the path to that file as its first message;
+do not ask the user. If another session is already working on this job, stand
+down. The allowance is shared with the other jobs: do not start parallel agents
+or repeat full test runs unless the coordinator says so.
+```
